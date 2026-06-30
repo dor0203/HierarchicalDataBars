@@ -1,9 +1,14 @@
-# Power BI Hierarchical Bar Chart (D3)
+# Power BI Hierarchical Bar Chart (D3)  
+Based on Mike Bostock’s D3 implementation
 
-This project is a raw Power BI custom visual based on Mike Bostock’s D3 hierarchical bar chart.
+Although I’m not a big Microsoft or Power BI enthusiast, it is the primary BI tool used for dashboards in my work environment.
 
-It uses the Power BI matrix data structure to transform hierarchical data into a format compatible with D3’s hierarchy layout, enabling drill-down interactions and animated transitions.
+I created this custom visual because the default Power BI visuals are limited when it comes to representing hierarchical data — something that is quite common in my use cases.
 
-The implementation is a direct adaptation of the original D3 example, adjusted to work within the Power BI custom visuals API.
+This implementation is based on one of Mike Bostock’s excellent designs available on Observable:  
+https://observablehq.com/@d3/hierarchical-bar-chart  
 
-> Note: This is a minimal, experimental implementation intended for learning and prototyping.
+This repository contains the raw TypeScript source used to build the visual.  
+If you plan to modify or compile it yourself, I recommend reviewing Microsoft’s documentation on Power BI custom visuals first.
+
+A compiled `.pbiviz` file is available in the Releases section.
