@@ -1,0 +1,26 @@
+{
+    "visual": {
+        "name": "hierarchicalDataBars",
+        "displayName": "hierarchical data bars",
+        "guid": "hierarchicalDataBars",
+        "visualClassName": "Visual",
+        "version": "1.0.0.0",
+        "description": "mike bostock's hierarchical data bars implementation for power bi",
+        "supportUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "gitHubUrl": "https://github.com/dor0203"
+    },
+    "apiVersion": "5.3.0",
+    "author": {
+        "name": "dor cohen",
+        "email": "dorcohen0203@gmail.com"
+    },
+    "assets": {
+        "icon": "assets/icon.png"
+    },
+    "externalJS": null,
+    "style": "style/visual.less",
+    "capabilities": "capabilities.json",
+    "dependencies": null,
+    "stringResources": [],
+    "version": "1.0.0.0"
+}
