@@ -14,31 +14,57 @@ interface DataNode {
     name: string,
     value?: number,
     children?: DataNode[],
-    selectionId?: ISelectionId,
+    selectionIds?: ISelectionId[],
+    pathKey?: string,
 }
 
 type Node = d3.HierarchyNode<DataNode> & { index: number, value: number };
 
-function convertMatrixNode(
-    node: powerbi.DataViewMatrixNode,
-    levels: powerbi.DataViewHierarchyLevel[],
-    host: IVisualHost
-): DataNode {
-    const result: DataNode = {
-        name: node.value != null ? String(node.value) : "",
-        selectionId: host.createSelectionIdBuilder()
-            .withMatrixNode(node, levels)
-            .createSelectionId(),
-    };
-    if (node.values) {
-        result.value = (node.values[0] as any)?.value;
+function buildDataTree(options: visualUpdateOptions, host: IVisualHost): DataNode {
+    const categorical = options.dataViews[0].categorical;
+    if (!categorical?.categories?.length || !categorical.values?.length) {
+        return { name: "root", children: [], selectionIds: [] };
     }
-    if (node.children) {
-        result.children = node.children.map(child =>
-            convertMatrixNode(child, levels, host)
-        );
+
+    const categories = categorical.categories;
+    const measure = categorical.values[0];
+    const root: DataNode = { name: "root", pathKey: "root", children: [], selectionIds: [] };
+
+    for (let row = 0; row < measure.values.length; row++) {
+        let current = root;
+        let path = "root";
+
+        for (let level = 0; level < categories.length; level++) {
+            const name = String(categories[level].values[row]);
+            path = `${path}|${name}`;
+            let child = current.children!.find(c => c.pathKey === path);
+            if (!child) {
+                child = { name, pathKey: path, children: [], selectionIds: [] };
+                current.children!.push(child);
+            }
+            current = child;
+        }
+
+        let builder = host.createSelectionIdBuilder();
+        for (let level = 0; level < categories.length; level++) {
+            builder = builder.withCategory(categories[level], row);
+        }
+        current.selectionIds = [builder.createSelectionId()];
+        current.value = (current.value ?? 0) + Number(measure.values[row]);
     }
-    return result;
+
+    // Bubble leaf IDs up to every ancestor.
+    // Clicking "Germany" sends [berlin_id, munich_id], both fully path-encoded.
+    function collectIds(node: DataNode): ISelectionId[] {
+        if (!node.children?.length) return node.selectionIds ?? [];
+        const ids: ISelectionId[] = [];
+        for (const child of node.children) ids.push(...collectIds(child));
+        node.selectionIds = ids;
+        return ids;
+    }
+    collectIds(root);
+
+    return root;
 }
 
 export class Visual implements IVisual {
@@ -85,20 +111,17 @@ export class Visual implements IVisual {
     }
 
     public update(options: visualUpdateOptions) {
-        const matrix = options.dataViews[0].matrix;
-        if (!matrix?.rows?.root) return;
+        const categorical = options.dataViews[0]?.categorical;
+        if (!categorical?.categories?.length || !categorical.values?.length) return;
 
-        const data: DataNode = {
-            name: "root",
-            children: (matrix.rows.root.children || []).map(child =>
-                convertMatrixNode(child, matrix.rows.levels, this.host)
-            )
-        };
-
+        const data = buildDataTree(options, this.host);
         const root = d3.hierarchy<DataNode>(data)
             .sum(d => d.value ?? 0)
-            .sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
-            .eachAfter(d => (d as Node).index = d.parent ? (d.parent as Node).index = (d.parent as Node).index + 1 || 0 : 0)  as Node;
+            .sort((a, b) => (b.value ?? 0) - (a.value ?? 0)) as Node;
+
+        root.eachAfter(d => (d as Node).index = d.parent
+            ? (d.parent as Node).index = ((d.parent as Node).index + 1 || 0)
+            : 0);
 
         this.width = options.viewport.width;
         let max = 0;
@@ -127,14 +150,12 @@ export class Visual implements IVisual {
             .attr("cursor", "pointer")
             .on("click", (_event: MouseEvent, d: any) => {
                 if (this.isTransitioning) return;
-                const numParents = d.ancestors().length - 1;
-                if (numParents === 0) this.selectionManager.clear();
-                
-                const slicedSelectionIds = this.selectionManager.getSelectionIds().slice(0, numParents);
-                this.selectionManager.select(
-                    slicedSelectionIds,
-                );
-
+                const parentIds: ISelectionId[] = d.parent?.data?.selectionIds ?? [];
+                if (parentIds.length) {
+                    this.selectionManager.select(parentIds, false);
+                } else {
+                    this.selectionManager.clear();
+                }
                 this.up(d);
             });
 
@@ -169,18 +190,12 @@ export class Visual implements IVisual {
             .attr("cursor", d => !d.children ? null : "pointer")
             .on("click", (event, d) => {
                 if (this.isTransitioning) return;
-
-                // force multi select up until leaf level, were it is not activated on default but allowed with ctrl+click
-                const hasChildren = (d.children?.length ?? 0) > 0;
-                const multiSelect = ((event as MouseEvent).ctrlKey && !hasChildren) || hasChildren;
-                
-                if (d.data.selectionId) {
+                if (d.data.selectionIds?.length) {
                     this.selectionManager.select(
-                        d.data.selectionId,// d.ancestors().map(d => d.data.selectionId).filter(id => id != null) as ISelectionId[],
-                        true //multiSelect  // ctrl+click = multi-select
+                        d.data.selectionIds,
+                        (event as MouseEvent).ctrlKey
                     );
                 }
-
                 this.down(d);
             });
 
