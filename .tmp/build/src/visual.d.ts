@@ -11,6 +11,7 @@ export declare class Visual implements IVisual {
     private barStep;
     private barPadding;
     private duration;
+    private isTransitioning;
     private color;
     private x;
     private width;

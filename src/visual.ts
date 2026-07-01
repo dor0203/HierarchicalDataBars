@@ -50,12 +50,13 @@ export class Visual implements IVisual {
     private barStep = 27;
     private barPadding = 3 / this.barStep;
     private duration = 750;
+    private isTransitioning = false;
     private color = d3.scaleOrdinal([true, false], ["steelblue", "#aaa"])
 
     private x!: d3.ScaleLinear<number, number>; // top scale
     private width = 0;
     private height = 0;
-
+    
     private xAxis = (g: any) => {
         g.attr("class", "x-axis")
             .attr("transform", `translate(0,${this.margin.top})`)
@@ -125,7 +126,14 @@ export class Visual implements IVisual {
             .attr("height", this.height)
             .attr("cursor", "pointer")
             .on("click", (_event: MouseEvent, d: any) => {
-                this.selectionManager.clear();
+                if (this.isTransitioning) return;
+                
+                const slicedSelectionIds = this.selectionManager.getSelectionIds().slice((d.children?.length ?? 0) ? 2 : 1);
+                if (this.selectionManager.getSelectionIds().length <= 1) this.selectionManager.clear()
+                this.selectionManager.select(
+                    slicedSelectionIds,
+                );
+
                 this.up(d);
             });
 
@@ -136,6 +144,8 @@ export class Visual implements IVisual {
             .append("g")
             .call(this.yAxis);
 
+        this.down(root);
+
         this.svg.on("contextmenu", (event: MouseEvent) => {
             this.selectionManager.showContextMenu({}, {
                 x: event.clientX,
@@ -143,8 +153,6 @@ export class Visual implements IVisual {
             });
             event.preventDefault();
         });
-
-        this.down(root);
     }
 
     private bar(d: Node, selector: string) {
@@ -159,13 +167,17 @@ export class Visual implements IVisual {
             .join("g")
             .attr("cursor", d => !d.children ? null : "pointer")
             .on("click", (event, d) => {
+                if (this.isTransitioning) return;
                 const node = d as Node;
-                if (node.data.selectionId) {
+                const newSelectionId = node.data.selectionId;
+                
+                if (newSelectionId) {
                     this.selectionManager.select(
-                        node.data.selectionId,
+                        d.ancestors().map(d => d.data.selectionId).filter(id => id != null) as ISelectionId[],
                         (event as MouseEvent).ctrlKey  // ctrl+click = multi-select
                     );
                 }
+
                 this.down(node);
             });
 
@@ -184,6 +196,7 @@ export class Visual implements IVisual {
 
     private down(d: Node) {
         if (!d.children || d3.active(this.svg.node())) return;
+        this.isTransitioning = true;
 
         // Rebind the current node to the background.
         this.svg.select(".background").datum(d);
@@ -238,6 +251,10 @@ export class Visual implements IVisual {
             .transition(transition2)
             .attr("fill", d => this.color(!!d.children))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0));
+        
+        setTimeout(() => {
+            this.isTransitioning = false;
+        }, this.duration * 2);
     }
 
     private stack(i: number) {
@@ -260,6 +277,7 @@ export class Visual implements IVisual {
 
     private up(d: Node) {
         if (!d.parent || !this.svg.selectAll(".exit").empty()) return;
+        this.isTransitioning = true;
 
         // Rebind the current node to the background.
         this.svg.select(".background").datum(d.parent);
@@ -319,5 +337,9 @@ export class Visual implements IVisual {
             .transition(transition2)
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .on("end", function (p) { d3.select(this).attr("fill-opacity", 1); });
+        
+        setTimeout(() => {
+            this.isTransitioning = false;
+        }, this.duration * 2);
     }
 }
