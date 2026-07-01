@@ -127,9 +127,10 @@ export class Visual implements IVisual {
             .attr("cursor", "pointer")
             .on("click", (_event: MouseEvent, d: any) => {
                 if (this.isTransitioning) return;
+                const numParents = d.ancestors().length - 1;
+                if (numParents === 0) this.selectionManager.clear();
                 
-                const slicedSelectionIds = this.selectionManager.getSelectionIds().slice((d.children?.length ?? 0) ? 2 : 1);
-                if (this.selectionManager.getSelectionIds().length <= 1) this.selectionManager.clear()
+                const slicedSelectionIds = this.selectionManager.getSelectionIds().slice(0, numParents);
                 this.selectionManager.select(
                     slicedSelectionIds,
                 );
@@ -168,17 +169,19 @@ export class Visual implements IVisual {
             .attr("cursor", d => !d.children ? null : "pointer")
             .on("click", (event, d) => {
                 if (this.isTransitioning) return;
-                const node = d as Node;
-                const newSelectionId = node.data.selectionId;
+
+                // force multi select up until leaf level, were it is not activated on default but allowed with ctrl+click
+                const hasChildren = (d.children?.length ?? 0) > 0;
+                const multiSelect = ((event as MouseEvent).ctrlKey && !hasChildren) || hasChildren;
                 
-                if (newSelectionId) {
+                if (d.data.selectionId) {
                     this.selectionManager.select(
-                        d.ancestors().map(d => d.data.selectionId).filter(id => id != null) as ISelectionId[],
-                        (event as MouseEvent).ctrlKey  // ctrl+click = multi-select
+                        d.data.selectionId,// d.ancestors().map(d => d.data.selectionId).filter(id => id != null) as ISelectionId[],
+                        true //multiSelect  // ctrl+click = multi-select
                     );
                 }
 
-                this.down(node);
+                this.down(d);
             });
 
         bar.append("text")
@@ -252,9 +255,9 @@ export class Visual implements IVisual {
             .attr("fill", d => this.color(!!d.children))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0));
         
-        setTimeout(() => {
+        transition1.on("end", () => {
             this.isTransitioning = false;
-        }, this.duration * 2);
+        });
     }
 
     private stack(i: number) {
@@ -338,8 +341,8 @@ export class Visual implements IVisual {
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .on("end", function (p) { d3.select(this).attr("fill-opacity", 1); });
         
-        setTimeout(() => {
+        transition1.on("end", () => {
             this.isTransitioning = false;
-        }, this.duration * 2);
+        });
     }
 }
