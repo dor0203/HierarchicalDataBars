@@ -3,6 +3,9 @@ import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructor
 import visualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
 import IVisual = powerbi.extensibility.visual.IVisual;
 import * as d3 from "d3";
+import ISelectionId = powerbi.visuals.ISelectionId;
+import ISelectionManager = powerbi.extensibility.ISelectionManager;
+import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 
 // @ts-ignore: Allow side-effect import of LESS stylesheet without module declarations.
 import "./../style/visual.less";
@@ -11,32 +14,45 @@ interface DataNode {
     name: string,
     value?: number,
     children?: DataNode[],
+    selectionId?: ISelectionId,
 }
 
 type Node = d3.HierarchyNode<DataNode> & { index: number, value: number };
 
-function convertToD3(node: any): any {
-    const result: any = {
-        name: node.value
+function convertMatrixNode(
+    node: powerbi.DataViewMatrixNode,
+    levels: powerbi.DataViewHierarchyLevel[],
+    host: IVisualHost
+): DataNode {
+    const result: DataNode = {
+        name: node.value != null ? String(node.value) : "",
+        selectionId: host.createSelectionIdBuilder()
+            .withMatrixNode(node, levels)
+            .createSelectionId(),
     };
     if (node.values) {
-        result.value = node.values[0].value;
+        result.value = (node.values[0] as any)?.value;
     }
     if (node.children) {
-        result.children = node.children.map(convertToD3);
+        result.children = node.children.map(child =>
+            convertMatrixNode(child, levels, host)
+        );
     }
     return result;
 }
 
 export class Visual implements IVisual {
+    private host!: IVisualHost;
+    private selectionManager!: ISelectionManager;
     private svg!: d3.Selection<SVGSVGElement, unknown, null, undefined>;
+
     private margin = { top: 30, right: 30, bottom: 0, left: 100 };
     private barStep = 27;
     private barPadding = 3 / this.barStep;
     private duration = 750;
     private color = d3.scaleOrdinal([true, false], ["steelblue", "#aaa"])
 
-    private x!: d3.ScaleLinear<number, number>;
+    private x!: d3.ScaleLinear<number, number>; // top scale
     private width = 0;
     private height = 0;
 
@@ -61,6 +77,8 @@ export class Visual implements IVisual {
     // private target: HTMLElement;
 
     constructor(options: VisualConstructorOptions) {
+        this.host = options.host;
+        this.selectionManager = options.host.createSelectionManager();
         this.svg = d3.select(options.element).append("svg")
         // this.target = options.element;
     }
@@ -71,7 +89,9 @@ export class Visual implements IVisual {
 
         const data: DataNode = {
             name: "root",
-            children: (matrix.rows.root.children || []).map(convertToD3)
+            children: (matrix.rows.root.children || []).map(child =>
+                convertMatrixNode(child, matrix.rows.levels, this.host)
+            )
         };
 
         const root = d3.hierarchy<DataNode>(data)
@@ -104,7 +124,10 @@ export class Visual implements IVisual {
             .attr("width", this.width)
             .attr("height", this.height)
             .attr("cursor", "pointer")
-            .on("click", (_event: MouseEvent, d: any) => this.up(d));
+            .on("click", (_event: MouseEvent, d: any) => {
+                this.selectionManager.clear();
+                this.up(d);
+            });
 
         this.svg
             .append("g")
@@ -112,6 +135,14 @@ export class Visual implements IVisual {
         this.svg
             .append("g")
             .call(this.yAxis);
+
+        this.svg.on("contextmenu", (event: MouseEvent) => {
+            this.selectionManager.showContextMenu({}, {
+                x: event.clientX,
+                y: event.clientY
+            });
+            event.preventDefault();
+        });
 
         this.down(root);
     }
@@ -127,7 +158,16 @@ export class Visual implements IVisual {
             .data(d.children ? d.children : [])
             .join("g")
             .attr("cursor", d => !d.children ? null : "pointer")
-            .on("click", (_event, d) => this.down(d));
+            .on("click", (event, d) => {
+                const node = d as Node;
+                if (node.data.selectionId) {
+                    this.selectionManager.select(
+                        node.data.selectionId,
+                        (event as MouseEvent).ctrlKey  // ctrl+click = multi-select
+                    );
+                }
+                this.down(node);
+            });
 
         bar.append("text")
             .attr("x", this.margin.left - 6)
