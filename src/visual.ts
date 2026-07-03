@@ -3,8 +3,6 @@ import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructor
 import visualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
 import IVisual = powerbi.extensibility.visual.IVisual;
 import * as d3 from "d3";
-import ISelectionId = powerbi.visuals.ISelectionId;
-import ISelectionManager = powerbi.extensibility.ISelectionManager;
 import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 import { BasicFilter } from "powerbi-models";
 
