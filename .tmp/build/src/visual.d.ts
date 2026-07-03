@@ -7,6 +7,7 @@ export declare class Visual implements IVisual {
     private host;
     private matrix;
     private levelFilters;
+    private skipUpdates;
     private getFilterTarget;
     private applyCurrentFilters;
     private svg;

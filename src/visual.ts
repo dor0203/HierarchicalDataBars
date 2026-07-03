@@ -42,6 +42,7 @@ export class Visual implements IVisual {
     private host!: IVisualHost;
     private matrix!: powerbi.DataViewMatrix | undefined;
     private levelFilters: Map<number, Set<string>> = new Map();
+    private skipUpdates: number = 0;
 
     private getFilterTarget(level: number): { table: string, column: string } {
         const source = this.matrix!.rows.levels[level].sources[0];
@@ -61,6 +62,7 @@ export class Visual implements IVisual {
             return;
         }
 
+        this.skipUpdates = 1;
         const filters = Array.from(this.levelFilters.entries())
             .sort(([a], [b]) => a - b) // ensure level order
             .map(([level, values]) => new BasicFilter(
@@ -112,6 +114,11 @@ export class Visual implements IVisual {
     }
 
     public update(options: visualUpdateOptions) {
+        if (this.skipUpdates > 0) {
+            this.skipUpdates--;
+            return;
+        }
+
         this.matrix = options.dataViews[0].matrix;
         if (!this.matrix?.rows?.root?.children?.length) return;
 
@@ -212,6 +219,7 @@ export class Visual implements IVisual {
                         this.levelFilters.set(i, new Set([ancestor.data.name]));
                     });
                 }
+
                 this.applyCurrentFilters();
                 this.down(d);
             });
