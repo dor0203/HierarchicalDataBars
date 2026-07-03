@@ -5,7 +5,10 @@ import IVisual = powerbi.extensibility.visual.IVisual;
 import "./../style/visual.less";
 export declare class Visual implements IVisual {
     private host;
-    private selectionManager;
+    private matrix;
+    private levelFilters;
+    private getFilterTarget;
+    private applyCurrentFilters;
     private svg;
     private margin;
     private barStep;

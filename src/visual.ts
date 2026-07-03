@@ -6,6 +6,8 @@ import * as d3 from "d3";
 import ISelectionId = powerbi.visuals.ISelectionId;
 import ISelectionManager = powerbi.extensibility.ISelectionManager;
 import IVisualHost = powerbi.extensibility.visual.IVisualHost;
+import { BasicFilter } from "powerbi-models";
+
 
 // @ts-ignore: Allow side-effect import of LESS stylesheet without module declarations.
 import "./../style/visual.less";
@@ -14,62 +16,64 @@ interface DataNode {
     name: string,
     value?: number,
     children?: DataNode[],
-    selectionIds?: ISelectionId[],
-    pathKey?: string,
 }
 
 type Node = d3.HierarchyNode<DataNode> & { index: number, value: number };
 
-function buildDataTree(options: visualUpdateOptions, host: IVisualHost): DataNode {
-    const categorical = options.dataViews[0].categorical;
-    if (!categorical?.categories?.length || !categorical.values?.length) {
-        return { name: "root", children: [], selectionIds: [] };
+function convertMatrixNode(
+    node: powerbi.DataViewMatrixNode,
+    host: IVisualHost
+): DataNode {
+    const result: DataNode = {
+        name: node.value != null ? String(node.value) : "",
+    };
+    if (node.values) {
+        result.value = (node.values[0] as any)?.value;
     }
-
-    const categories = categorical.categories;
-    const measure = categorical.values[0];
-    const root: DataNode = { name: "root", pathKey: "root", children: [], selectionIds: [] };
-
-    for (let row = 0; row < measure.values.length; row++) {
-        let current = root;
-        let path = "root";
-
-        for (let level = 0; level < categories.length; level++) {
-            const name = String(categories[level].values[row]);
-            path = `${path}|${name}`;
-            let child = current.children!.find(c => c.pathKey === path);
-            if (!child) {
-                child = { name, pathKey: path, children: [], selectionIds: [] };
-                current.children!.push(child);
-            }
-            current = child;
-        }
-
-        let builder = host.createSelectionIdBuilder();
-        for (let level = 0; level < categories.length; level++) {
-            builder = builder.withCategory(categories[level], row);
-        }
-        current.selectionIds = [builder.createSelectionId()];
-        current.value = (current.value ?? 0) + Number(measure.values[row]);
+    if (node.children) {
+        result.children = node.children.map(child =>
+            convertMatrixNode(child, host)
+        );
     }
-
-    // Bubble leaf IDs up to every ancestor.
-    // Clicking "Germany" sends [berlin_id, munich_id], both fully path-encoded.
-    function collectIds(node: DataNode): ISelectionId[] {
-        if (!node.children?.length) return node.selectionIds ?? [];
-        const ids: ISelectionId[] = [];
-        for (const child of node.children) ids.push(...collectIds(child));
-        node.selectionIds = ids;
-        return ids;
-    }
-    collectIds(root);
-
-    return root;
+    return result;
 }
 
 export class Visual implements IVisual {
     private host!: IVisualHost;
-    private selectionManager!: ISelectionManager;
+    private matrix!: powerbi.DataViewMatrix | undefined;
+    private levelFilters: Map<number, Set<string>> = new Map();
+
+    private getFilterTarget(level: number): { table: string, column: string } {
+        const source = this.matrix!.rows.levels[level].sources[0];
+        const queryName = source.queryName; // "TableName.ColumnName"
+        const lastDot = queryName!.lastIndexOf('.');
+        return {
+            table: queryName!.substring(0, lastDot),
+            column: queryName!.substring(lastDot + 1)
+        };
+    }
+
+    private applyCurrentFilters() {
+        if (this.levelFilters.size === 0) {
+            this.host.applyJsonFilter(
+                [], "general", "filter", powerbi.FilterAction.remove
+            );
+            return;
+        }
+
+        const filters = Array.from(this.levelFilters.entries())
+            .sort(([a], [b]) => a - b) // ensure level order
+            .map(([level, values]) => new BasicFilter(
+                this.getFilterTarget(level),
+                "In",
+                Array.from(values)
+            ));
+
+        this.host.applyJsonFilter(
+            filters, "general", "filter", powerbi.FilterAction.merge
+        );
+    }
+
     private svg!: d3.Selection<SVGSVGElement, unknown, null, undefined>;
 
     private margin = { top: 30, right: 30, bottom: 0, left: 100 };
@@ -78,11 +82,11 @@ export class Visual implements IVisual {
     private duration = 750;
     private isTransitioning = false;
     private color = d3.scaleOrdinal([true, false], ["steelblue", "#aaa"])
-
+    
     private x!: d3.ScaleLinear<number, number>; // top scale
     private width = 0;
     private height = 0;
-    
+
     private xAxis = (g: any) => {
         g.attr("class", "x-axis")
             .attr("transform", `translate(0,${this.margin.top})`)
@@ -101,20 +105,23 @@ export class Visual implements IVisual {
         return g;
     }
 
-    // private target: HTMLElement;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
-        this.selectionManager = options.host.createSelectionManager();
         this.svg = d3.select(options.element).append("svg")
-        // this.target = options.element;
     }
 
     public update(options: visualUpdateOptions) {
-        const categorical = options.dataViews[0]?.categorical;
-        if (!categorical?.categories?.length || !categorical.values?.length) return;
+        this.matrix = options.dataViews[0].matrix;
+        if (!this.matrix?.rows?.root?.children?.length) return;
 
-        const data = buildDataTree(options, this.host);
+        const data: DataNode = {
+            name: "root",
+            children: this.matrix.rows.root.children.map(child =>
+                convertMatrixNode(child, this.host)
+            )
+        };
+        
         const root = d3.hierarchy<DataNode>(data)
             .sum(d => d.value ?? 0)
             .sort((a, b) => (b.value ?? 0) - (a.value ?? 0)) as Node;
@@ -150,12 +157,17 @@ export class Visual implements IVisual {
             .attr("cursor", "pointer")
             .on("click", (_event: MouseEvent, d: any) => {
                 if (this.isTransitioning) return;
-                const parentIds: ISelectionId[] = d.parent?.data?.selectionIds ?? [];
-                if (parentIds.length) {
-                    this.selectionManager.select(parentIds, false);
+                if (!d.parent || d.parent.depth === 0) {
+                    this.levelFilters.clear();
                 } else {
-                    this.selectionManager.clear();
+                    const parentAncestors = d.parent.ancestors().reverse().slice(1);
+                    this.levelFilters.clear();
+                    parentAncestors.forEach((ancestor: any, i: number) => {
+                        this.levelFilters.set(i, new Set([ancestor.data.name]));
+                    });
                 }
+
+                this.applyCurrentFilters();
                 this.up(d);
             });
 
@@ -167,14 +179,6 @@ export class Visual implements IVisual {
             .call(this.yAxis);
 
         this.down(root);
-
-        this.svg.on("contextmenu", (event: MouseEvent) => {
-            this.selectionManager.showContextMenu({}, {
-                x: event.clientX,
-                y: event.clientY
-            });
-            event.preventDefault();
-        });
     }
 
     private bar(d: Node, selector: string) {
@@ -190,12 +194,25 @@ export class Visual implements IVisual {
             .attr("cursor", d => !d.children ? null : "pointer")
             .on("click", (event, d) => {
                 if (this.isTransitioning) return;
-                if (d.data.selectionIds?.length) {
-                    this.selectionManager.select(
-                        d.data.selectionIds,
-                        (event as MouseEvent).ctrlKey
-                    );
+
+                const isLeaf = !d.children || d.children.length === 0;
+                const ctrlKey = (event as MouseEvent).ctrlKey;
+
+                const ancestors = d.ancestors().reverse().slice(1);
+                if (isLeaf && ctrlKey) {
+                    const leafLevel = d.depth - 1;
+                    if (!this.levelFilters.has(leafLevel)) {
+                        this.levelFilters.set(leafLevel, new Set());
+                    }
+                    this.levelFilters.get(leafLevel)!.add(d.data.name);
+                } else {
+
+                    this.levelFilters.clear();
+                    ancestors.forEach((ancestor, i) => {
+                        this.levelFilters.set(i, new Set([ancestor.data.name]));
+                    });
                 }
+                this.applyCurrentFilters();
                 this.down(d);
             });
 
