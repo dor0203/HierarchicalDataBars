@@ -40,11 +40,11 @@ export class Visual implements IVisual {
     private host!: IVisualHost;
     private matrix!: powerbi.DataViewMatrix | undefined;
     private levelFilters: Map<number, Set<string>> = new Map();
-    private skipUpdates: number = 0;
+    private pendingUpdate: boolean = false;
 
     private getFilterTarget(level: number): { table: string, column: string } {
         const source = this.matrix!.rows.levels[level].sources[0];
-        const queryName = source.queryName; // "TableName.ColumnName"
+        const queryName = source.queryName;
         const lastDot = queryName!.lastIndexOf('.');
         return {
             table: queryName!.substring(0, lastDot),
@@ -60,9 +60,9 @@ export class Visual implements IVisual {
             return;
         }
 
-        this.skipUpdates = 1;
+        this.pendingUpdate = true;
         const filters = Array.from(this.levelFilters.entries())
-            .sort(([a], [b]) => a - b) // ensure level order
+            .sort(([a], [b]) => a - b) 
             .map(([level, values]) => new BasicFilter(
                 this.getFilterTarget(level),
                 "In",
@@ -111,9 +111,21 @@ export class Visual implements IVisual {
         this.svg = d3.select(options.element).append("svg")
     }
 
+    private currentPath: string[] = [];
+
+    private findNode(root: Node, path: string[]): Node {
+        let current: Node = root;
+        for (const name of path) {
+            const match = current.children?.find(c => c.data.name === name) as Node | undefined;
+            if (!match) return root;
+            current = match;
+        }
+        return current;
+    }
+
     public update(options: visualUpdateOptions) {
-        if (this.skipUpdates > 0) {
-            this.skipUpdates--;
+        if (this.pendingUpdate) {
+            this.pendingUpdate = false;
             return;
         }
 
@@ -131,9 +143,11 @@ export class Visual implements IVisual {
             .sum(d => d.value ?? 0)
             .sort((a, b) => (b.value ?? 0) - (a.value ?? 0)) as Node;
 
-        root.eachAfter(d => (d as Node).index = d.parent
-            ? (d.parent as Node).index = ((d.parent as Node).index + 1 || 0)
-            : 0);
+        root.eachBefore(d => {
+            (d as Node).index = d.parent
+                ? d.parent.children!.indexOf(d)
+                : 0;
+        });
 
         this.width = options.viewport.width;
         let max = 0;
@@ -183,7 +197,8 @@ export class Visual implements IVisual {
             .append("g")
             .call(this.yAxis);
 
-        this.down(root);
+        const startNode = this.findNode(root, this.currentPath);
+        this.down(startNode);
     }
 
     private bar(d: Node, selector: string) {
@@ -237,55 +252,43 @@ export class Visual implements IVisual {
 
     private down(d: Node) {
         if (!d.children || d3.active(this.svg.node())) return;
+        this.currentPath = d.ancestors().reverse().slice(1).map(n => n.data.name);
         this.isTransitioning = true;
 
-        // Rebind the current node to the background.
         this.svg.select(".background").datum(d);
 
-        // Define two sequenced transitions.
         const transition1 = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
         const transition2 = transition1.transition();
 
-        // Mark any currently-displayed bars as exiting.
         const exit = this.svg.selectAll(".enter")
             .attr("class", "exit");
 
-        // Entering nodes immediately obscure the clicked-on bar, so hide it.
         exit.selectAll("rect")
             .attr("fill-opacity", p => p === d ? 0 : null);
 
-        // Transition exiting bars to fade out.
         exit.transition(transition1)
             .attr("fill-opacity", 0)
             .remove();
 
-        // Enter the new bars for the clicked-on data.
-        // Per above, entering bars are immediately visible.
         const enter = this.bar(d, ".y-axis")
             .attr("fill-opacity", 0);
 
-        // Have the text fade-in, even though the bars are visible.
         enter.transition(transition1)
             .attr("fill-opacity", 1);
 
-        // Transition entering bars to their new y-position.
         enter.selectAll("g")
             .attr("transform", this.stack(d.index))
             .transition(transition1)
             .attr("transform", this.stagger());
 
-        // Update the x-scale domain.
         this.x.domain([0, d3.max(d.children, d => d.value) ?? 0]);
 
-        // Update the x-axis.
         this.svg.selectAll(".x-axis").transition(transition2)
             .call(this.xAxis);
 
-        // Transition entering bars to the new x-scale.
         enter.selectAll("g").transition(transition2)
             .attr("transform", (d, i) => `translate(0,${this.barStep * i})`);
 
-        // Color the bars as parents; they will fade to children if appropriate.
         enter.selectAll<SVGRectElement, Node>("rect")
             .attr("fill", this.color(true))
             .attr("fill-opacity", 1)
@@ -318,60 +321,45 @@ export class Visual implements IVisual {
 
     private up(d: Node) {
         if (!d.parent || !this.svg.selectAll(".exit").empty()) return;
+        this.currentPath = (d.parent as Node).ancestors().reverse().slice(1).map((n: any) => n.data.name);
         this.isTransitioning = true;
 
-        // Rebind the current node to the background.
         this.svg.select(".background").datum(d.parent);
 
-        // Define two sequenced transitions.
         const transition1 = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
         const transition2 = transition1.transition();
 
-        // Mark any currently-displayed bars as exiting.
         const exit = this.svg.selectAll(".enter")
             .attr("class", "exit");
 
-        // Update the x-scale domain.
         this.x.domain([0, d3.max((d.parent as Node).children as Node[], d => d.value) ?? 0]);
 
-        // Update the x-axis.
         this.svg.selectAll(".x-axis").transition(transition1)
             .call(this.xAxis);
 
-        // Transition exiting bars to the new x-scale.
         exit.selectAll("g").transition(transition1)
             .attr("transform", this.stagger());
 
-        // Transition exiting bars to the parent’s position.
         exit.selectAll("g").transition(transition2)
             .attr("transform", this.stack(d.index));
 
-        // Transition exiting rects to the new scale and fade to parent color.
         exit.selectAll<SVGRectElement, Node>("rect").transition(transition1)
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .attr("fill", this.color(true));
 
-        // Transition exiting text to fade out.
-        // Remove exiting nodes.
         exit.transition(transition2)
             .attr("fill-opacity", 0)
             .remove();
 
-        // Enter the new bars for the clicked-on data's parent.
         const enter = this.bar(d.parent, ".exit")
             .attr("fill-opacity", 0);
 
         enter.selectAll("g")
             .attr("transform", (d, i) => `translate(0,${this.barStep * i})`);
 
-        // Transition entering bars to fade in over the full duration.
         enter.transition(transition2)
             .attr("fill-opacity", 1);
 
-        // Color the bars as appropriate.
-        // Exiting nodes will obscure the parent bar, so hide it.
-        // Transition entering rects to the new x-scale.
-        // When the entering parent rect is done, make it visible!
         enter.selectAll<SVGRectElement, Node>("rect")
             .attr("fill", d => this.color(!!d.children))
             .attr("fill-opacity", p => p === d ? 0 : null)
