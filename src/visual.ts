@@ -53,6 +53,8 @@ export class Visual implements IVisual {
     }
 
     private applyCurrentFilters() {
+        this.pendingUpdate = true;
+
         if (this.levelFilters.size === 0) {
             this.host.applyJsonFilter(
                 [], "general", "filter", powerbi.FilterAction.remove
@@ -60,7 +62,6 @@ export class Visual implements IVisual {
             return;
         }
 
-        this.pendingUpdate = true;
         const filters = Array.from(this.levelFilters.entries())
             .sort(([a], [b]) => a - b) 
             .map(([level, values]) => new BasicFilter(
@@ -124,6 +125,7 @@ export class Visual implements IVisual {
     }
 
     public update(options: visualUpdateOptions) {
+        // skip updates applied by filtering data due to selecting bars
         if (this.pendingUpdate) {
             this.pendingUpdate = false;
             return;
