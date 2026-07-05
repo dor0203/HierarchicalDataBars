@@ -76,17 +76,31 @@ export class Visual implements IVisual {
     }
 
     private svg!: d3.Selection<SVGSVGElement, unknown, null, undefined>;
+    
+    private x!: d3.ScaleLinear<number, number>;
+    private width = 0;
+    private height = 0;
 
     private margin = { top: 30, right: 30, bottom: 0, left: 100 };
-    private barStep = 27;
-    private barPadding = 3 / this.barStep;
+
+    private minBarStep = 10;
+    private barStep = (d: Node) => {
+        return d.children
+            ? Math.max(
+                Math.min(
+                    (this.height - this.margin.top - this.margin.bottom) / d.children!.length, 
+                    this.height / 3
+                ), 
+                this.minBarStep
+            )
+            : this.minBarStep
+    }
+
+    private barPadding = (barStep: number) => (3 / barStep);
+
     private duration = 750;
     private isTransitioning = false;
     private color = d3.scaleOrdinal([true, false], ["steelblue", "#aaa"])
-    
-    private x!: d3.ScaleLinear<number, number>; // top scale
-    private width = 0;
-    private height = 0;
 
     private xAxis = (g: any) => {
         g.attr("class", "x-axis")
@@ -105,7 +119,6 @@ export class Visual implements IVisual {
                 .attr("y2", this.height - this.margin.bottom));
         return g;
     }
-
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -152,15 +165,16 @@ export class Visual implements IVisual {
         });
 
         this.width = options.viewport.width;
-        let max = 0;
-        root.each(d => d.children && (max = Math.max(max, d.children.length)));
-        this.height = max * this.barStep + this.margin.top + this.margin.bottom;
+        this.height = options.viewport.height;
 
         this.x = d3.scaleLinear().range([this.margin.left, this.width - this.margin.right]);
         this.x.domain([0, root.value ?? 0]);
 
         this.svg.interrupt();
         this.svg.selectAll("*").remove();
+
+        // a rebuild kills any in-flight transition, so never leave the flag stuck
+        this.isTransitioning = false;
 
         this.svg
             .attr("viewBox", `0 0 ${this.width} ${this.height}`)
@@ -203,10 +217,13 @@ export class Visual implements IVisual {
         this.down(startNode);
     }
 
-    private bar(d: Node, selector: string) {
+    private bar(d: Node, selector: string, layoutStep?: number) {
+        const barStep = layoutStep ?? this.barStep(d);
+        const barPadding = this.barPadding(barStep)
+
         const g = this.svg.insert("g", selector)
             .attr("class", "enter")
-            .attr("transform", `translate(0,${this.margin.top + this.barStep * this.barPadding})`)
+            .attr("transform", `translate(0,${this.margin.top + barStep * barPadding})`)
             .attr("text-anchor", "end")
             .style("font", "10px sans-serif");
 
@@ -241,135 +258,225 @@ export class Visual implements IVisual {
 
         bar.append("text")
             .attr("x", this.margin.left - 6)
-            .attr("y", this.barStep * (1 - this.barPadding) / 2)
+            .attr("y", barStep * (1 - barPadding) / 2)
             .attr("dy", ".35em")
             .text(d => d.data.name);
 
         bar.append("rect")
             .attr("x", this.x(0))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
-            .attr("height", this.barStep * (1 - this.barPadding));
+            .attr("height", barStep * (1 - barPadding));
         return g;
+    }
+
+    private stack(i: number, barStep: number) {
+        let value = 0;
+        return (d: any) => {
+            const t = `translate(${this.x(value) - this.x(0)},${barStep * i})`;
+            value += d.value;
+            return t;
+        };
+    }
+
+    private stagger(barStep: number) {
+        let value = 0;
+        return (d: any, i: number) => {
+            const t = `translate(${this.x(value) - this.x(0)},${barStep * i})`;
+            value += d.value;
+            return t;
+        };
+    }
+
+    private ratio(barStep: number) {
+        return (_d: any, i: number) => `translate(0,${barStep * i})`;
     }
 
     private down(d: Node) {
         if (!d.children || d3.active(this.svg.node())) return;
-        this.currentPath = d.ancestors().reverse().slice(1).map(n => n.data.name);
+
+        // set a transition flag
         this.isTransitioning = true;
 
+        // set the current new parent
+        this.currentPath = d.ancestors().reverse().slice(1).map(n => n.data.name);
+
+        // set barStep BEFORE transitions.
+        // On the initial render d is the hierarchy root and has no parent,
+        const ExitBarStep = d.parent ? this.barStep(d.parent as Node) : this.barStep(d);
+        // const ExitBarPadding = this.barPadding(ExitBarStep);
+        const EnterBarStep = this.barStep(d);
+        const EnterBarPadding = this.barPadding(EnterBarStep);
+
+        // Rebind the current node to the background.
         this.svg.select(".background").datum(d);
 
-        const transition1 = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
-        const transition2 = transition1.transition();
+        // Define three sequenced transitions.
+        const ratio_transition = this.svg.transition()
+            .duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;
+        const stack_transition = ratio_transition.transition();
+        const stagger_transition = stack_transition.transition();
 
+        // Mark any currently-displayed bars as exiting.
         const exit = this.svg.selectAll(".enter")
             .attr("class", "exit");
 
+        // Entering nodes immediately obscure the clicked-on bar, so hide it.
         exit.selectAll("rect")
-            .attr("fill-opacity", p => p === d ? 0 : null);
+            .attr("fill-opacity", p => p === d ? 0 : null)
 
-        exit.transition(transition1)
+        // adjust barstep of the exiting bars to the barstep of the bars entering
+        exit.transition(ratio_transition)
+                .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
+            exit.selectAll("g").transition(ratio_transition)
+                .attr("transform", this.ratio(EnterBarStep));
+            exit.selectAll("rect").transition(ratio_transition)
+                .attr("height", EnterBarStep * (1 - EnterBarPadding));
+            exit.selectAll("text").transition(ratio_transition)
+                .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
+
+        // Transition exiting bars to fade out.
+        exit.transition(stack_transition)
             .attr("fill-opacity", 0)
             .remove();
 
-        const enter = this.bar(d, ".y-axis")
+        // Enter the new bars for the clicked-on data.
+        // Per above, entering bars are immediately visible, so they must be
+        // rendered at the OLD (exit) bar step to line up with the clicked bar.
+        const enter = this.bar(d, ".y-axis", ExitBarStep)
             .attr("fill-opacity", 0);
 
-        enter.transition(transition1)
+        // Start stacked on the clicked bar in the old layout...
+        enter.selectAll("g")
+            .attr("transform", this.stack(d.index, ExitBarStep));
+
+        // ...then resize and re-stack in lockstep with the exiting bars.
+        enter.transition(ratio_transition)
+            .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
+        enter.selectAll("g").transition(ratio_transition)
+            .attr("transform", this.stack(d.index, EnterBarStep));
+        enter.selectAll("rect").transition(ratio_transition)
+            .attr("height", EnterBarStep * (1 - EnterBarPadding));
+        enter.selectAll("text").transition(ratio_transition)
+            .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
+
+        // Have the text fade-in, even though the bars are visible.
+        enter.transition(stack_transition)
             .attr("fill-opacity", 1);
 
-        enter.selectAll("g")
-            .attr("transform", this.stack(d.index))
-            .transition(transition1)
-            .attr("transform", this.stagger());
+        // Transition entering bars to their new y-position.
+        enter.selectAll("g").transition(stack_transition)
+            .attr("transform", this.stagger(EnterBarStep));
 
+        // Update the x-scale domain.
         this.x.domain([0, d3.max(d.children, d => d.value) ?? 0]);
 
-        this.svg.selectAll(".x-axis").transition(transition2)
+        // Update the x-axis.
+        this.svg.selectAll(".x-axis").transition(stagger_transition)
             .call(this.xAxis);
 
-        enter.selectAll("g").transition(transition2)
-            .attr("transform", (d, i) => `translate(0,${this.barStep * i})`);
+        // Transition entering bars to the new x-scale.
+        enter.selectAll("g").transition(stagger_transition)
+            .attr("transform", (d, i) => `translate(0,${EnterBarStep * i})`);
 
+        // Color the bars as parents; they will fade to children if appropriate.
         enter.selectAll<SVGRectElement, Node>("rect")
             .attr("fill", this.color(true))
             .attr("fill-opacity", 1)
-            .transition(transition2)
+            .transition(stagger_transition)
             .attr("fill", d => this.color(!!d.children))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0));
         
-        transition1.on("end", () => {
+        // reset transition flag (also on interrupt/cancel so clicks never lock up)
+        stagger_transition.on("end interrupt cancel", () => {
             this.isTransitioning = false;
         });
-    }
-
-    private stack(i: number) {
-        let value = 0;
-        return (d: any) => {
-            const t = `translate(${this.x(value) - this.x(0)},${this.barStep * i})`;
-            value += d.value;
-            return t;
-        };
-    }
-
-    private stagger() {
-        let value = 0;
-        return (d: any, i: number) => {
-            const t = `translate(${this.x(value) - this.x(0)},${this.barStep * i})`;
-            value += d.value;
-            return t;
-        };
     }
 
     private up(d: Node) {
         if (!d.parent || !this.svg.selectAll(".exit").empty()) return;
         this.currentPath = (d.parent as Node).ancestors().reverse().slice(1).map((n: any) => n.data.name);
+
+        // set a transition flag
         this.isTransitioning = true;
 
+        // set barStep BEFORE transitions
+        const ExitBarStep = this.barStep(d);
+        const ExitBarPadding = this.barPadding(ExitBarStep);
+        const EnterBarStep = this.barStep(d.parent);
+        const EnterBarPadding = this.barPadding(EnterBarStep);
+
+         // Rebind the current node to the background.
         this.svg.select(".background").datum(d.parent);
 
-        const transition1 = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
-        const transition2 = transition1.transition();
+        // Define two sequenced transitions.
+        const stagger_transition = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
+        const stack_transition = stagger_transition.transition();
+        const ratio_transition = stack_transition.transition();
 
+        // Mark any currently-displayed bars as exiting.
         const exit = this.svg.selectAll(".enter")
             .attr("class", "exit");
 
+        // Update the x-scale domain.
         this.x.domain([0, d3.max((d.parent as Node).children as Node[], d => d.value) ?? 0]);
 
-        this.svg.selectAll(".x-axis").transition(transition1)
+        // Update the x-axis.
+        this.svg.selectAll(".x-axis").transition(stagger_transition)
             .call(this.xAxis);
 
-        exit.selectAll("g").transition(transition1)
-            .attr("transform", this.stagger());
+        // Transition exiting bars to the new x-scale.
+        exit.selectAll("g").transition(stagger_transition)
+            .attr("transform", this.stagger(ExitBarStep));
 
-        exit.selectAll("g").transition(transition2)
-            .attr("transform", this.stack(d.index));
+        // Transition exiting bars to the parent’s position.
+        exit.selectAll("g").transition(stack_transition)
+            .attr("transform", this.stack(d.index, ExitBarStep));
 
-        exit.selectAll<SVGRectElement, Node>("rect").transition(transition1)
+        // Transition exiting rects to the new scale and fade to parent color.
+        exit.selectAll<SVGRectElement, Node>("rect").transition(stagger_transition)
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .attr("fill", this.color(true));
 
-        exit.transition(transition2)
+        // Transition exiting text to fade out.
+        // Remove exiting nodes.
+        exit.transition(stack_transition)
             .attr("fill-opacity", 0)
             .remove();
 
-        const enter = this.bar(d.parent, ".exit")
+        // Enter the new bars for the clicked-on data's parent, rendered at the
+        // OLD (exit) bar step; the ratio transition below resizes them.
+        const enter = this.bar(d.parent, ".exit", ExitBarStep)
             .attr("fill-opacity", 0);
 
         enter.selectAll("g")
-            .attr("transform", (d, i) => `translate(0,${this.barStep * i})`);
+            .attr("transform", (_d, i) => `translate(0,${ExitBarStep * i})`);
 
-        enter.transition(transition2)
+        // Transition entering bars to fade in over the full duration.
+        enter.transition(stack_transition)
             .attr("fill-opacity", 1);
 
+        // Color the bars as appropriate.
+        // Exiting nodes will obscure the parent bar, so hide it.
+        // Transition entering rects to the new x-scale.
+        // When the entering parent rect is done, make it visible!
         enter.selectAll<SVGRectElement, Node>("rect")
             .attr("fill", d => this.color(!!d.children))
             .attr("fill-opacity", p => p === d ? 0 : null)
-            .transition(transition2)
+            .transition(stack_transition)
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .on("end", function (p) { d3.select(this).attr("fill-opacity", 1); });
         
-        transition1.on("end", () => {
+        enter.transition(ratio_transition)
+            .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
+        enter.selectAll("g").transition(ratio_transition)
+            .attr("transform", this.ratio(EnterBarStep));
+        enter.selectAll("rect").transition(ratio_transition)
+            .attr("height", EnterBarStep * (1 - EnterBarPadding));
+        enter.selectAll("text").transition(ratio_transition)
+            .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
+
+        // reset transition flag (also on interrupt/cancel so clicks never lock up)
+        ratio_transition.on("end interrupt cancel", () => {
             this.isTransitioning = false;
         });
     }
