@@ -95,8 +95,7 @@ export class Visual implements IVisual {
             )
             : this.minBarStep
     }
-
-    private barPadding = (barStep: number) => (3 / barStep);
+    private barPadding = (barStep: number) => Math.max((2/30), 2 / barStep);
 
     private duration = 750;
     private isTransitioning = false;
@@ -217,6 +216,9 @@ export class Visual implements IVisual {
         this.down(startNode);
     }
 
+    // layoutStep lets callers render the entering bars at the bar step that is
+    // *currently on screen*, so the ratio transition can animate them to their
+    // final step instead of them popping in at the final size.
     private bar(d: Node, selector: string, layoutStep?: number) {
         const barStep = layoutStep ?? this.barStep(d);
         const barPadding = this.barPadding(barStep)
@@ -302,18 +304,25 @@ export class Visual implements IVisual {
 
         // set barStep BEFORE transitions.
         // On the initial render d is the hierarchy root and has no parent,
+        // so there is no "old" layout: fall back to the entering step.
         const ExitBarStep = d.parent ? this.barStep(d.parent as Node) : this.barStep(d);
-        // const ExitBarPadding = this.barPadding(ExitBarStep);
+        const ExitBarPadding = this.barPadding(ExitBarStep);
         const EnterBarStep = this.barStep(d);
         const EnterBarPadding = this.barPadding(EnterBarStep);
 
         // Rebind the current node to the background.
         this.svg.select(".background").datum(d);
 
+        // If the bar step doesn't change, the ratio phase would tween every
+        // attribute to the value it already has — skip it by zeroing its
+        // duration. Chained transitions inherit timing, so the follow-up
+        // phases must re-set their durations explicitly.
+        const skipRatio = Math.abs(ExitBarStep - EnterBarStep) < 1e-6;
+
         // Define three sequenced transitions.
         const ratio_transition = this.svg.transition()
-            .duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;
-        const stack_transition = ratio_transition.transition();
+            .duration(skipRatio ? 0 : this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;
+        const stack_transition = ratio_transition.transition().duration(this.duration);
         const stagger_transition = stack_transition.transition();
 
         // Mark any currently-displayed bars as exiting.
@@ -408,10 +417,14 @@ export class Visual implements IVisual {
          // Rebind the current node to the background.
         this.svg.select(".background").datum(d.parent);
 
+        // If the bar step doesn't change, skip the (trailing) ratio phase.
+        const skipRatio = Math.abs(ExitBarStep - EnterBarStep) < 1e-6;
+
         // Define two sequenced transitions.
         const stagger_transition = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
         const stack_transition = stagger_transition.transition();
-        const ratio_transition = stack_transition.transition();
+        const ratio_transition = stack_transition.transition()
+            .duration(skipRatio ? 0 : this.duration);
 
         // Mark any currently-displayed bars as exiting.
         const exit = this.svg.selectAll(".enter")
