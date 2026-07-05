@@ -95,7 +95,16 @@ export class Visual implements IVisual {
             )
             : this.minBarStep
     }
-    private barPadding = (barStep: number) => Math.max(0.05, 2 / barStep);
+    private barPadding = (barStep: number) => Math.max(0.1, 2 / barStep);
+
+    // Gap between a bar's right edge and its value label.
+    private valuePad = 4;
+    // SI notation matching the axis (k / M / G / ...): 3 significant figures,
+    // trailing zeros trimmed. d3's SI prefix for thousands is a lowercase "k",
+    // consistent with the axis ticks.
+    private siFormat = d3.format(".3~s");
+    private formatValue = (v: number) => this.siFormat(v);
+    private valueX = (d: Node) => this.x(d.value ?? 0) + this.valuePad;
 
     private duration = 750;
     private isTransitioning = false;
@@ -305,6 +314,17 @@ export class Visual implements IVisual {
             .attr("x", this.x(0))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .attr("height", barStep * (1 - barPadding));
+
+        // Value label sitting just past the bar's right edge. text-anchor:start
+        // overrides the group's "end" anchor so it reads outward from the bar.
+        bar.append("text")
+            .attr("class", "value")
+            .attr("text-anchor", "start")
+            .attr("x", d => this.valueX(d))
+            .attr("y", barStep * (1 - barPadding) / 2)
+            .attr("dy", ".35em")
+            .attr("fill", "currentColor")
+            .text(d => this.formatValue(d.value ?? 0));
         return g;
     }
 
@@ -437,6 +457,10 @@ export class Visual implements IVisual {
             .transition(stagger_transition)
             .attr("fill", d => this.color(!!d.children))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0));
+
+        // Move value labels to the new bar-edge positions in lockstep.
+        enter.selectAll<SVGTextElement, Node>("text.value").transition(stagger_transition)
+            .attr("x", d => this.valueX(d));
         
         // reset transition flag (also on interrupt/cancel so clicks never lock up)
         stagger_transition.on("end interrupt cancel", () => {
@@ -500,6 +524,10 @@ export class Visual implements IVisual {
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .attr("fill", this.color(true));
 
+        // Move exiting value labels to match the new scale.
+        exit.selectAll<SVGTextElement, Node>("text.value").transition(stagger_transition)
+            .attr("x", d => this.valueX(d));
+
         // Transition exiting text to fade out.
         // Remove exiting nodes.
         exit.transition(stack_transition)
@@ -528,6 +556,10 @@ export class Visual implements IVisual {
             .transition(stack_transition)
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .on("end", function (p) { d3.select(this).attr("fill-opacity", 1); });
+
+        // Move entering value labels to match the new scale.
+        enter.selectAll<SVGTextElement, Node>("text.value").transition(stack_transition)
+            .attr("x", d => this.valueX(d));
         
         enter.transition(ratio_transition)
             .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
