@@ -95,7 +95,7 @@ export class Visual implements IVisual {
             )
             : this.minBarStep
     }
-    private barPadding = (barStep: number) => Math.max((2/30), 2 / barStep);
+    private barPadding = (barStep: number) => Math.max(0.05, 2 / barStep);
 
     private duration = 750;
     private isTransitioning = false;
@@ -121,7 +121,43 @@ export class Visual implements IVisual {
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
-        this.svg = d3.select(options.element).append("svg")
+        this.scrollContainer = d3.select(options.element)
+            .append("div")
+            .attr("class", "scroll-container")
+            .style("overflow-y", "auto")
+            .style("overflow-x", "hidden")
+            .style("position", "relative");
+        this.svg = this.scrollContainer.append("svg")
+            .style("display", "block");
+    }
+
+    private scrollContainer!: d3.Selection<HTMLDivElement, unknown, null, undefined>;
+    private contentHeight = 0;
+
+    // Full drawable height a level needs. When bars clamp at minBarStep the
+    // content grows past the viewport and the container scrolls.
+    private levelHeight(d: Node): number {
+        const step = this.barStep(d);
+        const n = d.children ? d.children.length : 0;
+        return Math.max(
+            this.height,
+            this.margin.top + this.margin.bottom
+                + n * step + step * this.barPadding(step)
+        );
+    }
+
+    private resizeContent(h: number) {
+        this.contentHeight = h;
+        this.svg
+            .attr("height", `${h}`)
+            .attr("viewBox", `0 0 ${this.width} ${h}`);
+        this.svg.select(".background").attr("height", h);
+        this.svg.select(".y-axis line").attr("y2", h - this.margin.bottom);
+    }
+
+    private resetScroll() {
+        const node = this.scrollContainer.node() as HTMLDivElement;
+        node.scrollTop = 0;
     }
 
     private currentPath: string[] = [];
@@ -174,12 +210,13 @@ export class Visual implements IVisual {
 
         // a rebuild kills any in-flight transition, so never leave the flag stuck
         this.isTransitioning = false;
+        this.contentHeight = 0;
 
-        this.svg
-            .attr("viewBox", `0 0 ${this.width} ${this.height}`)
-            .attr("width", `${this.width}`)
-            .attr("height", `${this.height}`)
-            .attr("style", "max-width: 100%; height: auto;")
+        this.scrollContainer
+            .style("width", `${this.width}px`)
+            .style("height", `${this.height}px`);
+
+        this.svg.attr("width", `${this.width}`);
 
         this.svg
             .append("rect")
@@ -313,6 +350,12 @@ export class Visual implements IVisual {
         // Rebind the current node to the background.
         this.svg.select(".background").datum(d);
 
+        // Grow the canvas up-front so nothing is clipped mid-animation;
+        // shrink to the target only once the transition ends.
+        const targetHeight = this.levelHeight(d);
+        this.resizeContent(Math.max(this.contentHeight, targetHeight));
+        this.resetScroll();
+
         // If the bar step doesn't change, the ratio phase would tween every
         // attribute to the value it already has — skip it by zeroing its
         // duration. Chained transitions inherit timing, so the follow-up
@@ -398,6 +441,7 @@ export class Visual implements IVisual {
         // reset transition flag (also on interrupt/cancel so clicks never lock up)
         stagger_transition.on("end interrupt cancel", () => {
             this.isTransitioning = false;
+            this.resizeContent(this.levelHeight(d));
         });
     }
 
@@ -416,6 +460,12 @@ export class Visual implements IVisual {
 
          // Rebind the current node to the background.
         this.svg.select(".background").datum(d.parent);
+
+        // Grow up-front to fit whichever level is taller during the animation,
+        // then shrink to the parent's height when it ends.
+        const targetHeight = this.levelHeight(d.parent);
+        this.resizeContent(Math.max(this.contentHeight, targetHeight));
+        this.resetScroll();
 
         // If the bar step doesn't change, skip the (trailing) ratio phase.
         const skipRatio = Math.abs(ExitBarStep - EnterBarStep) < 1e-6;
@@ -491,6 +541,7 @@ export class Visual implements IVisual {
         // reset transition flag (also on interrupt/cancel so clicks never lock up)
         ratio_transition.on("end interrupt cancel", () => {
             this.isTransitioning = false;
+            this.resizeContent(this.levelHeight(d.parent!));
         });
     }
 }
