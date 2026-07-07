@@ -95,6 +95,7 @@ export class Visual implements IVisual {
             )
             : this.minBarStep
     }
+    // relative bar padding to the barStep size:
     private barPadding = (barStep: number) => Math.max(0.1, 2 / barStep);
 
     // Gap between a bar's right edge and its value label.
@@ -181,6 +182,8 @@ export class Visual implements IVisual {
         return current;
     }
 
+    private currentBarStep: number | undefined;
+
     public update(options: visualUpdateOptions) {
         // skip updates applied by filtering data due to selecting bars
         if (this.pendingUpdate) {
@@ -210,6 +213,7 @@ export class Visual implements IVisual {
 
         this.width = options.viewport.width;
         this.height = options.viewport.height;
+        this.currentBarStep = this.barStep(root);
 
         this.x = d3.scaleLinear().range([this.margin.left, this.width - this.margin.right]);
         this.x.domain([0, root.value ?? 0]);
@@ -262,19 +266,18 @@ export class Visual implements IVisual {
         this.down(startNode);
     }
 
-    // layoutStep lets callers render the entering bars at the bar step that is
-    // *currently on screen*, so the ratio transition can animate them to their
-    // final step instead of them popping in at the final size.
     private bar(d: Node, selector: string, layoutStep?: number) {
         const barStep = layoutStep ?? this.barStep(d);
         const barPadding = this.barPadding(barStep)
 
+        // Selection Container
         const g = this.svg.insert("g", selector)
             .attr("class", "enter")
             .attr("transform", `translate(0,${this.margin.top + barStep * barPadding})`)
             .attr("text-anchor", "end")
             .style("font", "10px sans-serif");
 
+        // Selection managing
         const bar = g.selectAll("g")
             .data(d.children ? d.children : [])
             .join("g")
@@ -304,19 +307,20 @@ export class Visual implements IVisual {
                 this.down(d);
             });
 
+        // Name labels
         bar.append("text")
             .attr("x", this.margin.left - 6)
             .attr("y", barStep * (1 - barPadding) / 2)
             .attr("dy", ".35em")
             .text(d => d.data.name);
-
+        
+        // Visible bar
         bar.append("rect")
             .attr("x", this.x(0))
             .attr("width", d => this.x(d.value ?? 0) - this.x(0))
             .attr("height", barStep * (1 - barPadding));
 
-        // Value label sitting just past the bar's right edge. text-anchor:start
-        // overrides the group's "end" anchor so it reads outward from the bar.
+        // Value labels
         bar.append("text")
             .attr("class", "value")
             .attr("text-anchor", "start")
@@ -352,18 +356,8 @@ export class Visual implements IVisual {
 
     private down(d: Node) {
         if (!d.children || d3.active(this.svg.node())) return;
-
-        // set a transition flag
         this.isTransitioning = true;
-
-        // set the current new parent
         this.currentPath = d.ancestors().reverse().slice(1).map(n => n.data.name);
-
-        // set barStep BEFORE transitions.
-        // On the initial render d is the hierarchy root and has no parent,
-        // so there is no "old" layout: fall back to the entering step.
-        const ExitBarStep = d.parent ? this.barStep(d.parent as Node) : this.barStep(d);
-        const ExitBarPadding = this.barPadding(ExitBarStep);
         const EnterBarStep = this.barStep(d);
         const EnterBarPadding = this.barPadding(EnterBarStep);
 
@@ -376,16 +370,11 @@ export class Visual implements IVisual {
         this.resizeContent(Math.max(this.contentHeight, targetHeight));
         this.resetScroll();
 
-        // If the bar step doesn't change, the ratio phase would tween every
-        // attribute to the value it already has — skip it by zeroing its
-        // duration. Chained transitions inherit timing, so the follow-up
-        // phases must re-set their durations explicitly.
-        const skipRatio = Math.abs(ExitBarStep - EnterBarStep) < 1e-6;
-
         // Define three sequenced transitions.
-        const ratio_transition = this.svg.transition()
-            .duration(skipRatio ? 0 : this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;
-        const stack_transition = ratio_transition.transition().duration(this.duration);
+        const skipResize = Math.abs(this.currentBarStep! - EnterBarStep) === 0;
+        const resize_transition = this.svg.transition()
+            .duration(skipResize ? 0 : this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;
+        const stack_transition = resize_transition.transition().duration(this.duration);
         const stagger_transition = stack_transition.transition();
 
         // Mark any currently-displayed bars as exiting.
@@ -393,18 +382,20 @@ export class Visual implements IVisual {
             .attr("class", "exit");
 
         // Entering nodes immediately obscure the clicked-on bar, so hide it.
-        exit.selectAll("rect")
-            .attr("fill-opacity", p => p === d ? 0 : null)
+        exit.selectAll("rect").attr("fill-opacity", p => p === d ? 0 : null)
 
-        // adjust barstep of the exiting bars to the barstep of the bars entering
-        exit.transition(ratio_transition)
-                .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
-            exit.selectAll("g").transition(ratio_transition)
-                .attr("transform", this.ratio(EnterBarStep));
-            exit.selectAll("rect").transition(ratio_transition)
-                .attr("height", EnterBarStep * (1 - EnterBarPadding));
-            exit.selectAll("text").transition(ratio_transition)
-                .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
+
+        // exit.transition(resize_transition)
+        //     .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
+        // shrink / expand the visualy selected bar to match the barstep of the children:
+        exit.selectAll("rect").transition(resize_transition)
+            .attr("height", EnterBarStep * (1 - EnterBarPadding));
+        // move all bars (including lbls ans selection area) accordingly as the selcted bar shrinks / expands:
+        exit.selectAll("g").transition(resize_transition)
+            .attr("transform", (_: any, i: number) => `translate(0,${EnterBarStep * i})`);
+        // not sure what this does -
+        exit.selectAll("text").transition(resize_transition)
+            .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
 
         // Transition exiting bars to fade out.
         exit.transition(stack_transition)
@@ -414,21 +405,21 @@ export class Visual implements IVisual {
         // Enter the new bars for the clicked-on data.
         // Per above, entering bars are immediately visible, so they must be
         // rendered at the OLD (exit) bar step to line up with the clicked bar.
-        const enter = this.bar(d, ".y-axis", ExitBarStep)
+        const enter = this.bar(d, ".y-axis", this.currentBarStep)
             .attr("fill-opacity", 0);
 
         // Start stacked on the clicked bar in the old layout...
         enter.selectAll("g")
-            .attr("transform", this.stack(d.index, ExitBarStep));
+            .attr("transform", this.stack(d.index, this.currentBarStep!));
 
         // ...then resize and re-stack in lockstep with the exiting bars.
-        enter.transition(ratio_transition)
+        enter.transition(resize_transition)
             .attr("transform", `translate(0,${this.margin.top + EnterBarStep * EnterBarPadding})`);
-        enter.selectAll("g").transition(ratio_transition)
+        enter.selectAll("g").transition(resize_transition)
             .attr("transform", this.stack(d.index, EnterBarStep));
-        enter.selectAll("rect").transition(ratio_transition)
+        enter.selectAll("rect").transition(resize_transition)
             .attr("height", EnterBarStep * (1 - EnterBarPadding));
-        enter.selectAll("text").transition(ratio_transition)
+        enter.selectAll("text").transition(resize_transition)
             .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
 
         // Have the text fade-in, even though the bars are visible.
@@ -461,6 +452,8 @@ export class Visual implements IVisual {
         // Move value labels to the new bar-edge positions in lockstep.
         enter.selectAll<SVGTextElement, Node>("text.value").transition(stagger_transition)
             .attr("x", d => this.valueX(d));
+
+        this.currentBarStep = EnterBarStep;
         
         // reset transition flag (also on interrupt/cancel so clicks never lock up)
         stagger_transition.on("end interrupt cancel", () => {
@@ -477,8 +470,6 @@ export class Visual implements IVisual {
         this.isTransitioning = true;
 
         // set barStep BEFORE transitions
-        const ExitBarStep = this.barStep(d);
-        const ExitBarPadding = this.barPadding(ExitBarStep);
         const EnterBarStep = this.barStep(d.parent);
         const EnterBarPadding = this.barPadding(EnterBarStep);
 
@@ -492,7 +483,7 @@ export class Visual implements IVisual {
         this.resetScroll();
 
         // If the bar step doesn't change, skip the (trailing) ratio phase.
-        const skipRatio = Math.abs(ExitBarStep - EnterBarStep) < 1e-6;
+        const skipRatio = Math.abs(this.currentBarStep! - EnterBarStep) < 1e-6;
 
         // Define two sequenced transitions.
         const stagger_transition = this.svg.transition().duration(this.duration) as unknown as d3.Transition<d3.BaseType, unknown, null, undefined>;;
@@ -513,11 +504,11 @@ export class Visual implements IVisual {
 
         // Transition exiting bars to the new x-scale.
         exit.selectAll("g").transition(stagger_transition)
-            .attr("transform", this.stagger(ExitBarStep));
+            .attr("transform", this.stagger(this.currentBarStep!));
 
         // Transition exiting bars to the parent’s position.
         exit.selectAll("g").transition(stack_transition)
-            .attr("transform", this.stack(d.index, ExitBarStep));
+            .attr("transform", this.stack(d.index, this.currentBarStep!));
 
         // Transition exiting rects to the new scale and fade to parent color.
         exit.selectAll<SVGRectElement, Node>("rect").transition(stagger_transition)
@@ -536,11 +527,11 @@ export class Visual implements IVisual {
 
         // Enter the new bars for the clicked-on data's parent, rendered at the
         // OLD (exit) bar step; the ratio transition below resizes them.
-        const enter = this.bar(d.parent, ".exit", ExitBarStep)
+        const enter = this.bar(d.parent, ".exit", this.currentBarStep!)
             .attr("fill-opacity", 0);
 
         enter.selectAll("g")
-            .attr("transform", (_d, i) => `translate(0,${ExitBarStep * i})`);
+            .attr("transform", (_d, i) => `translate(0,${this.currentBarStep! * i})`);
 
         // Transition entering bars to fade in over the full duration.
         enter.transition(stack_transition)
@@ -569,6 +560,8 @@ export class Visual implements IVisual {
             .attr("height", EnterBarStep * (1 - EnterBarPadding));
         enter.selectAll("text").transition(ratio_transition)
             .attr("y", EnterBarStep * (1 - EnterBarPadding) / 2);
+
+        this.currentBarStep = EnterBarStep;
 
         // reset transition flag (also on interrupt/cancel so clicks never lock up)
         ratio_transition.on("end interrupt cancel", () => {
